@@ -1,38 +1,18 @@
 /*
-  mapgen.c
+
+  golem master
   
-  tile <ascii> <mapto> <top> <right> <bottom> <left>
-  ":"<mapline>
-
-
-    num := <hexnum> | <decnum> | <asciinum>
-    asciinum := "'" <char>
-    hexnum := "$" <hexdigit> { <hexdigit> }
-    decnum := <decdigit> { <decdigit> }
-    decdigit := "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
-    hexdigit := "a" | "b" | "c" | "d" | "e" | "f" | "A" | "B" | "C" | "D" | "E" | "F" | <decdigit>
-
-
-  The value 0 for "top", "right", "bottom" or "left" means match any.
   
+      
 */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <string.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <assert.h>
+
 
 #include "u8g2.h"
-#include "ugl.h"
-
-extern void u8g2_SetupBuffer_TGA(u8g2_t *u8g2, const u8g2_cb_t *u8g2_cb);
-extern void tga_save(const char *name);
-extern int tga_init(uint16_t w, uint16_t h);
-extern u8x8_display_info_t u8x8_tga_info;
+#include "map.h"
+#include "item.h"
+#include <stdio.h>
+#include <unistd.h>
 
 
 const uint8_t scrollosprites[6642] U8G2_FONT_SECTION("scrollosprites") = 
@@ -246,852 +226,174 @@ const uint8_t scrollosprites[6642] U8G2_FONT_SECTION("scrollosprites") =
   "\24\16E\203\261\220(\205\22:D\16\7\3\0\0\0";
 
 
+#define MAP_DISPLAY_WIDTH 8
+#define MAP_DISPLAY_HEIGHT 4
 
-struct tile_struct
+/*===============================================*/
+
+u8g2_t u8g2;
+pos_t window_upper_left_pos;
+
+
+/*===============================================*/
+
+
+void map_draw(uint8_t map_idx, uint8_t x0, uint8_t y0)
 {
-  int ascii;
-  int map_to;
-  int condition[4];  
-  int item_index;		/* reference into item_list */  
-};
-#define TILE_MAX 4096
-struct tile_struct tile_list[TILE_MAX];
-
-int tile_cnt = 0;
-
-#define ITEM_IDENTIFIER_MAX 256
-
-/* global item templates */
-struct item_struct
-{
-  char name[ITEM_IDENTIFIER_MAX];
-  uint8_t fg_tile;	/* for tga output and inital tile, bg-tile is set via tile_list */
-  uint16_t init_proc;
-  uint16_t hit_proc;
-  uint16_t step_proc;
-};
-
-struct item_struct item_list[256];
-int item_cnt;
-
-#define MAP_SIZE_X 1024
-#define MAP_SIZE_Y 1024
-#define MAP_LINE_MAX 4096
-
-
-#define PHASE_MAPDATA 0
-#define PHASE_MAPSTRUCT 1
-
-int map_phase;
-uint8_t map[MAP_SIZE_Y][MAP_SIZE_X];
-uint8_t map2[MAP_SIZE_Y][MAP_SIZE_X];
-int map_curr_line = 0;
-char map_name[MAP_LINE_MAX];
-long map_width = 0;
-long map_height = 0;
-uint16_t map_init_code_pos;
-
-
-FILE *map_fp;
-char map_line[MAP_LINE_MAX];
-
-FILE *out_fp;
-
-
-/*============================================*/
-int item_get_idx_by_name(const char *name)
-{
-  int i;
-  for( i = 0; i < item_cnt; i++ )
+  uint8_t x, y;
+  for( y = 0; y < MAP_DISPLAY_HEIGHT; y++ )
   {
-    if ( strcmp(item_list[i].name, name) == 0 )
-      return i;
-  }
-  return -1;
-}
-
-int item_add(const char *name)
-{
-  if ( item_cnt < 256 )
-  {
-    strcpy(item_list[item_cnt].name, name);
-    item_cnt++;
-    return item_cnt-1;
-  }
-  return -1;
-}
-
-void item_write(FILE *fp)
-{
-  int i;
-  fprintf(fp, "item_template_t item_template_list[] = {\n");
-  for( i = 0; i < item_cnt;i++ )
-  {
-    fprintf(fp, "  { /* init= */ %u, /* hit= */%u, /* step= */ %u, /* fg= */ 0x%02x}", item_list[i].init_proc, item_list[i].hit_proc, item_list[i].step_proc, item_list[i].fg_tile);    
-    if ( i != item_cnt-1 )
-	fprintf(fp, ",\n");
-    else
- 	fprintf(fp, "\n");
-      
-  }
-  
-  fprintf(fp, "};\n\n");
-}
-
-
-
-/*============================================*/
-
-static void skip_space(const char **s)
-{
-  for(;;)
-  {
-    if ( **s == '#' )
+    for( x = 0; x < MAP_DISPLAY_WIDTH; x++ )
     {
-      while( **s != '\0' )
-	(*s)++;
-      break;
-    }
-    if ( **s == '\0' )
-      break;
-    if ( **s > ' ' )
-      break;
-    (*s)++;
-  }
-}
-
-static long get_dec(const char **s)
-{
-  long v = 0;
-  for(;;)
-  {
-    if ( (**s) >= '0' && (**s)  <= '9' )
-    {
-      v*=10;
-      v+= (**s)-'0';
-      (*s)++;
-    }
-    else
-    {
-      break;
-    }
-  }  
-  skip_space(s);
-  return v;
-}
-
-static long get_hex(const char **s)
-{
-  long v = 0;
-  for(;;)
-  {
-    if ( (**s) >= '0' && (**s)  <= '9' )
-    {
-      v*=16;
-      v+= (**s)-'0';
-      (*s)++;
-    }
-    else if ( (**s) >= 'a' && (**s)  <= 'f' )
-    {
-      v*=16;
-      v+= (**s)-'a'+10;
-      (*s)++;
-    }
-    else if ( (**s) >= 'A' && (**s)  <= 'F' )
-    {
-      v*=16;
-      v+= (**s)-'A'+10;
-      (*s)++;
-    }
-    else
-    {
-      break;
-    }
-  }
-  skip_space(s);
-  return v;
-}
-
-static long get_ascii(const char **s)
-{
-  long v = 0;
-  v = **s;
-  (*s)++;
-  skip_space(s);
-  return v;  
-}
-
-
-static long get_num(const char **s)
-{
-  if ( (**s) == '$' )
-  {
-    (*s)++;
-    return get_hex(s);
-  }
-  if ( (**s) == '\'' )
-  {
-    (*s)++;
-    return get_ascii(s);
-  }
-  
-  return get_dec(s);
-}
-
-static const char *get_identifier(const char **s)
-{
-  static char buf[MAP_LINE_MAX];
-  int c;
-  int i = 0;
-  buf[0] = '\0';
-  for(;;)
-  {
-    c = **s;
-    if ( c < 'A' )
-      break;
-    if ( i >= MAP_LINE_MAX-2 )
-      break;
-    buf[i++] = c;
-    buf[i] = '\0';
-    (*s)++;
-  }
-  skip_space(s);
-  return buf;
-}
-
-/*============================================*/
-
-
-
-int get_tile_idx_by_ascii(int ascii)
-{
-  int i;
-  for( i = 0; i < tile_cnt; i++ )
-  {
-    if ( tile_list[i].ascii == ascii )
-      return i;
-  }
-  return -1;
-}
-
-/*============================================*/
-/* map a tile from map[][] to map2[][] */
-/* called by map_all_tile */
-int map_tile(int x, int y)
-{
-  int ascii, i, j;
-  int cond[4];
-  int is_condition_match;
-  //int is_simple_match;
-  int condition_match_cnt;
-  int condition_match_max;
-  int i_best;
-  
-  /* get the ascii version */
-  ascii = map[y][x];
-  cond[0] = 32;
-  cond[1] = 32;
-  cond[2] = 32;
-  cond[3] = 32;
-  
-  if ( y > 0 ) cond[0] = map[y-1][x];
-  if ( x+1 < map_width ) cond[1] = map[y][x+1];
-  if ( y+1 < map_height ) cond[2] = map[y+1][x];
-  if ( x > 0 ) cond[3] = map[y][x-1];
-  
-  /* find matching tile */
-  condition_match_max = -1;
-  i_best = -1;
-  for( i = 0; i < tile_cnt; i++ )
-  {
-    if ( tile_list[i].ascii == ascii )
-    {
-      is_condition_match = 1;
-      //is_simple_match = 1;
-      condition_match_cnt = 0;
-      for( j = 0; j < 4; j++ )
+      if ( (uint8_t)(x+x0) < (uint8_t)map_list[map_idx].width )
       {
-	if ( tile_list[i].condition[j] != 0 )
+	if ( (uint8_t)(y+y0) < (uint8_t)map_list[map_idx].height )
 	{
-	  //is_simple_match = 0;
-	  if ( tile_list[i].condition[j] != cond[j] )
-	  {
-	    is_condition_match = 0;
-	  }
-	  else
-	  {
-	    condition_match_cnt++;
-	  }
-	}
-      }
-      if ( is_condition_match )
-      {
-	if ( condition_match_max < condition_match_cnt )
-	{
-	  condition_match_max = condition_match_cnt;
-	  i_best = i;
+	  u8g2_DrawGlyph(&u8g2, x*16, 16+y*16, getMapTile(x+x0, y+y0));
 	}
       }
     }
   }
-  if ( i_best < 0 )
-  {
-    printf("no tile mapping found for '%c' (x=%d, y=%d)\n", ascii, x, y);
+}
+
+
+uint8_t is_inside(pos_t *p, pos_t *upper_left, uint8_t w, uint8_t h)
+{
+  if ( p->x < upper_left->x )
     return 0;
-  }
-  //printf("tile mapping '%c' --> $%02x (x=%d, y=%d)\n", ascii, tile_list[i_best].map_to, x, y);
-  map2[y][x] = tile_list[i_best].map_to;
+  if ( p->y < upper_left->y )
+    return 0;
+  if ( p->x >= upper_left->x+w )
+    return 0;
+  if ( p->y >= upper_left->y+h )
+    return 0;
   return 1;
 }
 
-int map_all_tiles(void)
+/* assumes, that the direction of the item is set, but not yet executed */
+void setWindowPosByItem(uint8_t item_index)
 {
-  int x, y;
-  for( y = 0; y < map_height; y++ )
-    for( x = 0; x < map_width; x++ )
-      if ( map_tile(x,y) == 0 )
-	return 0;
-  return 1;
-}
-
-/*============================================*/
-
-void clear_map(void)
-{
-  int x, y;
-  for( y = 0; y < MAP_SIZE_Y; y++ )
-    for( x = 0; x < MAP_SIZE_X; x++ )
-      map[y][x] =32;
-  map_curr_line = 0;
-}
-
-void write_map(void)
-{
-  int x, y;
+  item_t *item;
+  pos_t tmp;
+  uint8_t window_dir = 5;
   
-  if ( map_phase == PHASE_MAPDATA )
+  item = pool_GetItem(item_index);
+  
+  tmp = window_upper_left_pos;
+  tmp.x++;
+  tmp.y++;
+  if ( is_inside(&(item->pos), &tmp, MAP_DISPLAY_WIDTH-2, MAP_DISPLAY_HEIGHT-2 ) == 0 )
   {
-    if ( out_fp != NULL )
-    {      
-      fprintf(out_fp, "unsigned char map_%s[%ld] = \n", map_name, map_height*map_width);
-      for( y = 0; y < map_height; y++ )
-      {
-	fprintf(out_fp, "    \"");
-	for( x = 0; x < map_width; x++ )
-	{
-	  fprintf(out_fp, "\\x%02x", map2[y][x]);
-	}
-	fprintf(out_fp, "\"");
-	if ( y+1 < map_height )
-	  fprintf(out_fp, "\n");
-	else
-	  fprintf(out_fp, ";\n");
-      }
-      fprintf(out_fp, "\n");
-    }
+    printf("center\n");
+    window_upper_left_pos.x = item->pos.x;
+    window_upper_left_pos.x -= MAP_DISPLAY_WIDTH/2;
+    window_upper_left_pos.y = item->pos.y;
+    window_upper_left_pos.y -= MAP_DISPLAY_HEIGHT/2;  
+    window_dir = item->dir;
   }
-}
-
-void write_map_struct(void)
-{
-  if ( map_phase == PHASE_MAPSTRUCT )
+  else
   {
-    if ( out_fp != NULL )
+    if ( item->dir == 0 )
     {
-      fprintf(out_fp, "  { ");
-      fprintf(out_fp, "map_%s, ", map_name);
-      fprintf(out_fp, "item_onmap_%s, ", map_name);
-      fprintf(out_fp, "/* map init code */ %u, ", map_init_code_pos);
-      fprintf(out_fp, "ITEM_ONMAP_%s_CNT, ", map_name);      
-      fprintf(out_fp, "/* width= */ %ld, ", map_width);
-      fprintf(out_fp, "/* height= */ %ld ", map_height);
-      fprintf(out_fp, " },");
-      fprintf(out_fp, "\n");
+      if ( item->pos.x == window_upper_left_pos.x + MAP_DISPLAY_WIDTH -2 )
+	window_dir = item->dir;
+    }
+    else if ( item->dir == 1 )
+    {
+      if ( item->pos.y == window_upper_left_pos.y+MAP_DISPLAY_HEIGHT-2 )
+	window_dir = item->dir;
+    }
+    else if ( item->dir == 2 )
+    {
+      if ( item->pos.x == window_upper_left_pos.x+1 )
+	window_dir = item->dir;
+    }
+    else if ( item->dir == 3 )
+    {
+      if ( item->pos.y == window_upper_left_pos.y+1 )
+	window_dir = item->dir;
     }
   }
+  
+  posStep(&window_upper_left_pos, window_dir);
 }
 
-void write_tga_map(const char *filename)
+
+void moveHero(uint8_t dir)
 {
-  static u8g2_t u8g2;
-  int x, y, i;
-  unsigned tile;
-  if ( map_phase != PHASE_MAPDATA )
-    return;
+  /* hero move/action */
+  moveItem(0, dir);
   
-  u8x8_tga_info.tile_width = map_width*2;
-  u8x8_tga_info.tile_height  = map_height*2;
-  u8x8_tga_info.pixel_width = map_width*16;
-  u8x8_tga_info.pixel_height  = map_height*16;
+  /* other monster actions */
+  callStepAllItems();
+
+  /* recalculate window position */
+  setWindowPosByItem(0);
   
-  u8g2_SetupBuffer_TGA(&u8g2, &u8g2_cb_r0);
+  /* execute any movements */
+  moveAllItems();
+  
+}
+
+int main(void)
+{
+  int k;
+  uint8_t x, y;
+  
+  x = 0;
+  y = 0;
+  
+  u8g2_SetupBuffer_SDL_128x64_4(&u8g2, &u8g2_cb_r0);
   u8x8_InitDisplay(u8g2_GetU8x8(&u8g2));
   u8x8_SetPowerSave(u8g2_GetU8x8(&u8g2), 0);  
+  
   u8g2_SetFont(&u8g2, scrollosprites);
-  
-  
-  u8g2_FirstPage(&u8g2);
-  do
-  {
-    for( y = 0; y < map_height; y++ )
-    {
-      for( x = 0; x < map_width; x++ )
-      {
-	tile = map2[y][x];
-	/* check if there is a fg_tile, if so, use that tile instead */
-	for( i = 0; i < tile_cnt; i++ )
-	{
-	  if ( tile_list[i].item_index >= 0 )
-	  {
-	    if ( tile_list[i].ascii == map[y][x] )
-	    {
-	      tile = item_list[tile_list[i].item_index].fg_tile;
-	    }
-	  }
-	}
-	
-	u8g2_DrawGlyph(&u8g2, x*16, y*16+16, tile);
-      }
-    }
-    
-  } while( u8g2_NextPage(&u8g2) );
-    
-  tga_save(filename);
-  
-}
 
-static void write_item_onmap(void)
-{
-  int x, y, i;
-  int is_first = 1;
-  int cnt = 0;
-  /* 
-    pseudo code:
-    with all tiles on the map
-      if the tile is connected to an item
-	output an item onmap entry
-  */
-  if ( map_phase == PHASE_MAPDATA )
-  {
-    if ( out_fp != NULL )
-    {
-      fprintf(out_fp, "item_onmap_t item_onmap_%s[] = {\n", map_name);
-      for( y = 0; y < map_height; y++ )
-      {
-	for( x = 0; x < map_width; x++ )
-	{
-	  for( i = 0; i < tile_cnt; i++ )
-	  {
-	    if ( tile_list[i].item_index >= 0 )
-	    {
-	      if ( tile_list[i].ascii == map[y][x] )
-	      {
-		if ( is_first == 0 )
-		{
-		  fprintf(out_fp, ",\n");
-		}
-		is_first = 0;
-		fprintf(out_fp, "  ");
-		fprintf(out_fp, "{ /*x=*/ %d, /*y=*/ %d, /*idx=*/ %d, %d}", x, y, tile_list[i].item_index, 0);
-		cnt++;
-	      }
-	    }
-	  }
-	}
-      }
-      fprintf(out_fp, "\n};\n");
-      fprintf(out_fp, "#define ITEM_ONMAP_%s_CNT %d\n\n", map_name, cnt);
-      
-    }
-  }
-}
+  setupLevel(0);
+  /* recalculate window position */
+  setWindowPosByItem(0);
 
-int map_read_tile(const char **s, int is_overwrite, int item_index)
-{
-  long ascii;
-  int idx, i;
-  
-  ascii = get_num(s);
-  
-  if ( is_overwrite )
-  {
-    for( idx = 0; idx < tile_cnt; idx++ )
-    {
-      if ( tile_list[idx].ascii == ascii )
-	break;
-    }
-  }
-  else
-  {
-    idx = tile_cnt;
-  }
-  
-  if ( idx < tile_cnt )
-  {
-    for( i = 0; i < 4; i++ )
-    {
-      tile_list[idx].condition[i] = 0;
-    }
-  }
-  else
-  {
-    
-    if ( tile_cnt >= TILE_MAX )
-    {
-      printf("max number of tiles reached\n");
-      return 0;
-    }
-    idx = tile_cnt;
-    tile_cnt++;
-  }
-  
-  tile_list[idx].ascii = ascii;
-  tile_list[idx].item_index = item_index;
-    
-  tile_list[idx].map_to = get_num(s);
-  for( i = 0; i < 4; i++ )
-  {
-    tile_list[idx].condition[i] = get_num(s);
-  }
-  
-  //printf("[%d] tile %c: ", idx, (int)ascii);
-  //printf("map to $%02x\n", tile_list[idx].map_to);
-    
-  return 1;
-}
-
-
-/*============================================*/
-/* read one row of the game map */
-
-
-int map_read_row(const char **s)
-{
-  int x = 0;
-  //printf("line %d\n", map_curr_line);
-  while ( **s >= ' ' )
-  {
-    if ( x > map_width )
-    {
-      printf("map '%s': Row '%d' too long\n", map_name, map_curr_line);
-      return 0;
-    }
-    //printf("%d ", **s);
-    map[map_curr_line][x] = **s;
-    (*s)++;
-    x++;
-    
-  }
-  map_curr_line++;
-  return 1;
-}
-
-
-/*============================================*/
-/* read a command of the map file */
-
-
-int map_read_map_cmd(const char **s)
-{
-  
-  /* get new map */
-  strcpy(map_name, get_identifier(s));
-  map_width = get_num(s);
-  map_height = get_num(s);
-
-  printf("map '%s' (%ld x %ld)\n", map_name, map_width, map_height);
-  
-  map_init_code_pos = 0;
-  clear_map();
-  return 1;
-}
-
-
-int is_inside_proc;
-int is_inside_map;
-
-int map_read_line(const char **s)
-{
-  const char *id;
-  
-  if ( is_inside_proc != 0 )
-  {
-    if ( uglReadLine(s) == 0 )
-      is_inside_proc = 0;
-    return 1;
-  }
-  skip_space(s);
-  
-  if ( **s == '#' )		/* comment (hmm handled by skip_space) */
-    return 1;
-
-  if ( **s == '\0' )		/* empty line */
-    return 1;
-  
-  if ( **s == ':' )
-  {
-    (*s)++;
-    return map_read_row(s);
-  }
-  
-  id = get_identifier(s);
-  if ( strcmp(id, "tile") == 0 )
-  {
-     return map_read_tile(s, 0, -1);
-  }
-  else if ( strcmp(id, "thing") == 0 )
-  {
-     return map_read_tile(s, 1, -1);
-  }
-  else if ( strcmp(id, "itemkey") == 0 )
-  {
-    const char *id;
-    int idx;
-    id = get_identifier(s);
-    idx = item_get_idx_by_name(id);
-    if ( idx < 0 )
-    {
-      printf("code line %d, item '%s' unknown.\n", ugl_current_input_line, id);
-    }
-    else
-    {
-     return map_read_tile(s, 1, idx);
-    }
-  }
-  else if ( strcmp(id, "item") == 0 )
-  {
-    const char *id;
-    int idx;
-    id = get_identifier(s);
-    idx = item_get_idx_by_name(id);
-    if ( idx >= 0 )
-    {
-      printf("code line %d, item '%s' already exists.\n", ugl_current_input_line, id);
-    }
-    else
-    {
-      if ( item_add(id) < 0 )
-      {
-	printf("code line %d, item '%s': Too many items.\n", ugl_current_input_line, id);
-      }
-      else
-      {
-	idx = item_get_idx_by_name(id);
-	assert( idx >= 0 );
-	item_list[idx].fg_tile = get_num(s);
-      }
-    }  
-    
-    return 1;
-  }
-  else if ( strcmp(id, "mapinit") == 0 )
-  {
-    map_init_code_pos = uglStartNamelessProc(0);
-    is_inside_proc = 1;
-    return 1;
-  }  
-  else if ( strcmp(id, "iteminit") == 0 )
-  {
-    const char *id;
-    int idx;
-    uint16_t code_pos;
-    
-    id = get_identifier(s);
-    idx = item_get_idx_by_name(id);
-    code_pos = uglStartNamelessProc(0);
-    if ( idx < 0 )
-    {
-	printf("code line %d, item '%s' not found.\n", ugl_current_input_line, id);
-    }
-    else
-    {
-      item_list[idx].init_proc= code_pos;
-    }    
-    is_inside_proc = 1;
-    return 1;
-  }
-  else if ( strcmp(id, "itemhit") == 0 )
-  {
-    const char *id;
-    int idx;
-    uint16_t code_pos;
-    
-    id = get_identifier(s);
-    idx = item_get_idx_by_name(id);
-    code_pos = uglStartNamelessProc(0);
-    if ( idx < 0 )
-    {
-	printf("code line %d, item '%s' not found.\n", ugl_current_input_line, id);
-    }
-    else
-    {
-      item_list[idx].hit_proc= code_pos;
-    }    
-    is_inside_proc = 1;
-    return 1;
-  }
-  else if ( strcmp(id, "itemstep") == 0 )
-  {
-    const char *id;
-    int idx;
-    uint16_t code_pos;
-    
-    id = get_identifier(s);
-    idx = item_get_idx_by_name(id);
-    code_pos = uglStartNamelessProc(0);
-    if ( idx < 0 )
-    {
-	printf("code line %d, item '%s' not found.\n", ugl_current_input_line, id);
-    }
-    else
-    {
-      item_list[idx].step_proc= code_pos;
-    }    
-    is_inside_proc = 1;
-    return 1;
-  }
-  else if ( strcmp(id, "map") == 0 )
-  {
-    is_inside_map = 1;
-
-    return map_read_map_cmd(s);
-  }
-  else if ( strcmp(id, "endmap") == 0 )
-  {
-    /* write existing map: once a map has been read, transform it to the target */
-    if ( map_width > 0 && map_height > 0 )
-    {
-      if ( map_all_tiles() )
-      {
-	char buf[128];
-	write_map();
-	write_item_onmap();
-	sprintf(buf, "%s.tga", map_name);
-	write_tga_map(buf);
-	write_map_struct();
-      }
-    }
-    is_inside_map = 0;
-    return 1;
-  }
-  else
-  {
-    printf("code line %d, map line %d: unkown command '%s'\n", ugl_current_input_line, map_curr_line, id);
-  }
-  
-  return 1;
-}
-
-int map_read_fp(void)
-{
-  const char *s;
-  ugl_InitBytecode();
-  if ( map_phase == PHASE_MAPDATA )
-    ugl_is_suppress_log = 0;
-  if ( map_phase == PHASE_MAPSTRUCT )
-    ugl_is_suppress_log = 1;
-  
-  ugl_current_input_line = 1;
-  tile_cnt = 0;
-  item_cnt = 0;
   
   for(;;)
   {
-    if ( fgets(map_line, MAP_LINE_MAX, map_fp) == NULL )
-      break;
-    s = &(map_line[0]);
-    if ( map_read_line(&s) == 0 )
+    
+    printf("%d %d\n",window_upper_left_pos.x ,window_upper_left_pos.y);
+    
+    u8g2_FirstPage(&u8g2);
+    do
     {
-      if ( is_inside_proc )
-	printf("endproc missing\n");
-      if ( is_inside_map )
-	printf("endmap missing\n");
-      return 0;
+      map_draw(0, window_upper_left_pos.x, window_upper_left_pos.y);
+    } while( u8g2_NextPage(&u8g2) );
+    
+    do
+    {
+    
+      //usleep(100000);
+      k = u8g_sdl_get_key();
+    } while( k < 0 );
+
+    if ( k == 'q' ) break;    
+    
+    switch( k )
+    {
+      case 273: y--; 
+	moveHero(3);
+	break;
+      case 274: y++; 
+	moveHero(1);
+	break;
+      case 276: x--; 
+	moveHero(2);
+	break;
+      case 275: x++; 
+	moveHero(0);
+	break;      
+      default: break;
     }
-    ugl_current_input_line++;
+    
+    
+        
   }
-  ugl_ResolveSymbols();
-  return 1;
+  return 0;
 }
 
-int map_read_filename(const char *name, int phase)
-{
-  map_phase = phase;  
-  map_fp = fopen(name, "r");
-  if ( map_fp == NULL )
-    return 0;
-  printf("file '%s'\n", name);
-  if ( map_read_fp() == 0 )
-    return fclose(map_fp), 0;
-  fclose(map_fp);
-  return 1;
-}
-
-int main(int argc, char **argv)
-{
-  const char *filename = NULL;
-  const char *outfile = NULL;
-  if ( argc <= 1 )
-  {
-    printf("%s [options] mapfile\n", argv[0]);
-    printf("  -o c-file-name\n");
-    exit(1);
-  }
-  argv++;
-  argc--;
-  
-  while( argc > 0 )
-  {
-    if ( strcmp(*argv, "-o" ) == 0 )
-    {
-      argv++;
-      argc--;
-      if ( argc <= 0 )
-      {
-	printf("output file missing\n");
-	exit(1);
-      }
-      outfile = argv[0];
-    }
-    else
-    {
-      filename = argv[0];
-    }
-    argv++;
-    argc--;
-  }
-  
-  clear_map();
-  
-  if ( filename != NULL  )
-  {
-    out_fp= NULL;
-    if ( outfile != NULL )
-    {
-      out_fp = fopen(outfile, "w");
-      printf("output file %s\n", outfile);
-      fprintf(out_fp, "/* %s generated by mapgen, olikraus@gmail.com */\n", outfile);
-      fprintf(out_fp, "\n");
-      fprintf(out_fp, "#include \"map.h\"\n");
-      fprintf(out_fp, "\n");
-    }
-    map_read_filename(filename, PHASE_MAPDATA);
-
-    ugl_WriteBytecodeCArray(out_fp, "map_code");
-    
-    //write_item_onmap();
-    
-    item_write(out_fp);
-    
-    if ( out_fp != NULL )
-    {
-      fprintf(out_fp, "map_t map_list[] = {\n");
-      map_read_filename(filename, PHASE_MAPSTRUCT);
-      fprintf(out_fp, "};\n");
-      fprintf(out_fp, "\n");
-      
-    }
-    if ( out_fp != NULL )
-      fclose(out_fp);
-  }
-}
