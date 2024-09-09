@@ -17,7 +17,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <error.h>
 #include <ctype.h>
 #include <unistd.h>
 
@@ -1474,6 +1473,7 @@ struct controller controller_list[] =
       { "erc12864_alt" },	/* issue 790 */
       { "nhd_c12864" },
       { "jlx12864" },
+      { "rcxr01" },
       { NULL }
     },
   },
@@ -2663,7 +2663,8 @@ void str_add(const char *s)
     return;
   if ( str_cnt >= STR_MAX )
   {
-    error(1,0, "max number of strings reached");
+    printf("ERROR: max number of strings reached\n");
+    exit(2);
   }
   else
   {
